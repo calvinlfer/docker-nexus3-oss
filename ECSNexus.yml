@@ -39,7 +39,7 @@ Parameters:
   NexusDockerImage:
     Type: String
     Description: The Docker image to use for Nexus (resides on Docker Hub)
-    Default: 'freckleiot/nexus3-oss:latest'
+    Default: 'freckleiot/nexus3-oss:3.10.0'
   LoadBalancerIdleTimeout:
     Type: Number
     Description: The time in seconds the ELB will keep idle connections active
@@ -118,44 +118,6 @@ Resources:
       Tags:
       - Key: Name
         Value: !Sub 'ECS Nexus ELB - ${AWS::StackName}'
-  EcsTaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Sid: ''
-          Effect: Allow
-          Principal:
-            Service: ecs-tasks.amazonaws.com
-          Action: sts:AssumeRole
-      Path: /
-      Policies:
-      - PolicyName: NexusECSPolicy
-        PolicyDocument:
-          Statement:
-          - Sid: Stmt1452746887373
-            Action:
-            - ecs:RegisterTaskDefinition
-            - ecs:ListClusters
-            - ecs:ListTaskDefinitions
-            - ecs:DescribeTaskDefinition
-            - ecs:DescribeContainerInstances
-            Effect: Allow
-            Resource: '*'
-          - Sid: Stmt1452746887374
-            Action:
-            - ecs:StopTask
-            - ecs:ListContainerInstances
-            Effect: Allow
-            Resource: !Join [/, [!Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster',
-                !ImportValue {'Fn::Sub': '${ClusterStackName}-ClusterName'}]]
-          - Sid: Stmt1452746887376
-            Action:
-            - ecs:StopTask
-            - ecs:DescribeTasks
-            Effect: Allow
-            Resource: !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/*'
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -166,9 +128,9 @@ Resources:
         Cpu: !Ref 'Cpu'
         MemoryReservation: !Ref 'Memory'
         Ulimits:
-          Name: nofile # see https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_Ulimit.html
-          SoftLimit: 4096 # see https://help.sonatype.com/repomanager3/system-requirements#SystemRequirements-AdequateFileHandleLimits
-          HardLimit: 65536
+          - Name: nofile # see https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_Ulimit.html
+            SoftLimit: 4096 # see https://help.sonatype.com/repomanager3/system-requirements#SystemRequirements-AdequateFileHandleLimits
+            HardLimit: 65536
         Environment:
         # We will run as this user (docker-user)
         - Name: LOCAL_USER_ID
@@ -199,7 +161,6 @@ Resources:
             - ${MountPath}/docker-user/nexus
             - MountPath:
                 Fn::ImportValue: !Sub '${ClusterStackName}-MountPath'
-      TaskRoleArn: !Ref 'EcsTaskRole'
   Service:
     Type: AWS::ECS::Service
     DependsOn: NexusLogGroup
