@@ -1,0 +1,19 @@
+#!/bin/bash
+
+USER_ID=${LOCAL_USER_ID:-9001}
+
+echo "Starting with UID : $USER_ID"
+if [ -z "$LOCAL_USER_GID" ]
+then
+    echo "Without group"
+    useradd --shell /bin/bash -u $USER_ID -o -c "" -m user
+    chown -R $USER_ID /nexus-data
+else
+    echo "With group: $LOCAL_USER_GID"
+    groupadd -g $LOCAL_USER_GID user-group
+    useradd --shell /bin/bash -u $USER_ID -g $LOCAL_USER_GID -o -c "" -m user
+    chown -R $USER_ID:$LOCAL_USER_GID /nexus-data
+fi
+
+export HOME=/home/user
+exec /usr/local/bin/gosu user "$@"
