@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates a Nexus service in an existing ECS cluster
+Parameters:
+  ClusterStackName:
+    Description: Name of an active CloudFormation stack that contains an ECS cluster (mounted to EFS)
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets in which load balancer will run (Private)
+  AllowedCidr:
+    Description: The IP address range that source traffic to Nexus is allowed
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  NexusLogRetention:
+    Type: Number
+    Description: Number of days to retain logs for the Nexus in CloudWatch Logs
+    Default: '14'
+  HostedZoneName:
+    Type: String
+    Description: The domain of the hosted zone ending with a period
+  CertificateArn:
+    Type: String
+    Description: The ARN of a certificate to attach to the Load Balancer.
+  Memory:
+    Type: Number
+    Description: The soft memory limit for the Nexus container
+    Default: '8192'
+  Cpu:
+    Type: Number
+    Description: The minimum CPU units reserved for the Nexus container. (1000 = 1 core)
+    Default: '2000'
+  NexusDockerImage:
+    Type: String
+    Description: The Docker image to use for Nexus (resides on Docker Hub)
+    Default: 'freckleiot/nexus3-oss:latest'
+  LoadBalancerIdleTimeout:
+    Type: Number
+    Description: The time in seconds the ELB will keep idle connections active
+    Default: '180'
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'General'
+        Parameters:
+          - ClusterStackName
+      - Label:
+          default: 'Nexus ECS specifications'
+        Parameters:
+          - Cpu
+          - Memory
+          - NexusDockerImage
+      - Label:
+          default: 'Network'
+        Parameters:
+          - SubnetIds
+          - AllowedCidr
+          - HostedZoneName
+          - CertificateArn
+          - LoadBalancerIdleTimeout
+      - Label:
+          default: 'Backups and logs'
+        Parameters:
+          - NexusLogRetention
+Resources:
+  ELBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Nexus ELB Security Group'
+      VpcId: !ImportValue
+        Fn::Sub: ${ClusterStackName}-VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref 'AllowedCidr'
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: !Ref 'AllowedCidr'
+      Tags:
+      - Key: Name
+        Value: !Sub 'ECS Nexus ELB Security Group - ${AWS::StackName}'
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      Scheme: internal
+      Subnets: !Ref 'SubnetIds'
+      SecurityGroups:
+      - !Ref 'ELBSecurityGroup'
+      - !ImportValue
+        Fn::Sub: ${ClusterStackName}-EcsLoadBalancerSecurityGroupId
+      ConnectionSettings:
+        IdleTimeout: !Ref 'LoadBalancerIdleTimeout'
+      Listeners:
+      - InstancePort: '55000'
+        InstanceProtocol: HTTP
+        LoadBalancerPort: '80'
+        Protocol: HTTP
+      - InstancePort: '55000'
+        InstanceProtocol: HTTP
+        LoadBalancerPort: '443'
+        Protocol: HTTPS
+        SSLCertificateId: !Ref 'CertificateArn'
+      HealthCheck:
+        HealthyThreshold: '2'
+        Interval: '30'
+        Target: TCP:55000
+        Timeout: '5'
+        UnhealthyThreshold: '5'
+      Tags:
+      - Key: Name
+        Value: !Sub 'ECS Nexus ELB - ${AWS::StackName}'
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: NexusECSPolicy
+        PolicyDocument:
+          Statement:
+          - Sid: Stmt1452746887373
+            Action:
+            - ecs:RegisterTaskDefinition
+            - ecs:ListClusters
+            - ecs:ListTaskDefinitions
+            - ecs:DescribeTaskDefinition
+            - ecs:DescribeContainerInstances
+            Effect: Allow
+            Resource: '*'
+          - Sid: Stmt1452746887374
+            Action:
+            - ecs:StopTask
+            - ecs:ListContainerInstances
+            Effect: Allow
+            Resource: !Join [/, [!Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster',
+                !ImportValue {'Fn::Sub': '${ClusterStackName}-ClusterName'}]]
+          - Sid: Stmt1452746887376
+            Action:
+            - ecs:StopTask
+            - ecs:DescribeTasks
+            Effect: Allow
+            Resource: !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/*'
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+      - Name: nexus
+        Image: !Ref 'NexusDockerImage'
+        Hostname: nexus
+        Cpu: !Ref 'Cpu'
+        MemoryReservation: !Ref 'Memory'
+        Ulimits:
+          Name: nofile # see https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_Ulimit.html
+          SoftLimit: 4096 # see https://help.sonatype.com/repomanager3/system-requirements#SystemRequirements-AdequateFileHandleLimits
+          HardLimit: 65536
+        Environment:
+        # We will run as this user (docker-user)
+        - Name: LOCAL_USER_ID
+          Value: 5001
+        # EFS group
+        - Name: LOCAL_USER_GID
+          Value: 555
+        - Name: INSTALL4J_ADD_VM_PARAMS # see https://hub.docker.com/r/sonatype/nexus3/
+          Value: "-Xms1g -Xmx6g -XX:MaxDirectMemorySize=3g" # see https://help.sonatype.com/repomanager3/system-requirements#SystemRequirements-Memory
+        Essential: true
+        MountPoints:
+        - ContainerPath: /nexus-data
+          SourceVolume: efs-nexus
+          ReadOnly: false
+        PortMappings:
+        - HostPort: 55000
+          ContainerPort: 8081
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'NexusLogGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: ecs
+      Volumes:
+      - Name: efs-nexus
+        Host:
+          SourcePath: !Sub
+            - ${MountPath}/docker-user/nexus
+            - MountPath:
+                Fn::ImportValue: !Sub '${ClusterStackName}-MountPath'
+      TaskRoleArn: !Ref 'EcsTaskRole'
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: NexusLogGroup
+    Properties:
+      ServiceName: nexus
+      Role: !ImportValue
+        Fn::Sub: ${ClusterStackName}-EcsServiceRole
+      TaskDefinition: !Ref 'TaskDefinition'
+      DesiredCount: 1
+      LoadBalancers:
+      - ContainerName: nexus
+        ContainerPort: '8081'
+        LoadBalancerName: !Ref 'LoadBalancer'
+      Cluster: !ImportValue
+        Fn::Sub: ${ClusterStackName}-ClusterName
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+  NexusLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref 'NexusLogRetention'
+      LogGroupName: !Sub '${AWS::StackName}'
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneNameID
+        DNSName: !GetAtt LoadBalancer.DNSName
+      HostedZoneName: !Ref 'HostedZoneName'
+      Name: !Sub 'nexus.${HostedZoneName}'
+      Type: A
+Outputs:
+  Service:
+    Description: The name of the ECS service created
+    Value: !GetAtt Service.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceName'
+  TaskArn:
+    Description: The ARN of the task created for the service
+    Value: !Ref 'TaskDefinition'
+  LoadBalancerDNS:
+    Description: The dns name of the app load balancer for the service
+    Value: !GetAtt [LoadBalancer, DNSName]
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerDNSName'
+  LoadBalancer:
+    Description: The ARN of the app load balancer for the service
+    Value: !Ref 'LoadBalancer'
+  LogGroup:
+    Description: The name of the log group created/used for Nexus
+    Value: !Ref 'NexusLogGroup'
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupName'
