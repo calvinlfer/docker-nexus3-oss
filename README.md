@@ -11,7 +11,6 @@ This image is intended to be used with AWS EBS and AWS EFS.
 
 The base [Nexus](https://hub.docker.com/r/sonatype/nexus3) image used is 3.10.0.
 
-
 ## AWS ECS ##
 The [CloudFormation template](ECSNexus.yml) deploys Nexus in an existing ECS cluster where EFS is mounted. This is 
 designed to work with [ecs-cluster](https://github.com/FreckleIOT/ecs-cluster) which has CloudFormation templates to
