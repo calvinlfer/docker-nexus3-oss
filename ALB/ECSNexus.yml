@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates a Nexus service in an existing ECS cluster
+Parameters:
+  ClusterStackName:
+    Description: Name of an active CloudFormation stack that contains an ECS cluster (mounted to EFS)
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+  ALBStackName:
+    Description: Name of an active ALB stack contains the Application Load Balancer
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+  NexusLogRetention:
+    Type: Number
+    Description: Number of days to retain logs for the Nexus in CloudWatch Logs
+    Default: '14'
+  HostedZoneName:
+    Type: String
+    Description: The domain of the hosted zone ending with a period
+  Memory:
+    Type: Number
+    Description: The soft memory limit for the Nexus container
+    Default: '8192'
+  Cpu:
+    Type: Number
+    Description: The minimum CPU units reserved for the Nexus container. (1000 = 1 core)
+    Default: '2000'
+  NexusDockerImage:
+    Type: String
+    Description: The Docker image to use for Nexus (resides on Docker Hub)
+    Default: 'freckleiot/nexus3-oss:3.10.0'
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'General'
+        Parameters:
+          - ClusterStackName
+          - ALBStackName
+      - Label:
+          default: 'Nexus ECS specifications'
+        Parameters:
+          - Cpu
+          - Memory
+          - NexusDockerImage
+      - Label:
+          default: 'Network'
+        Parameters:
+          - HostedZoneName
+      - Label:
+          default: 'Backups and logs'
+        Parameters:
+          - NexusLogRetention
+Resources:
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 20
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 10
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: '/'
+      Matcher:
+        HttpCode: '200-299'
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: '20'
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${ALBStackName}-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Sub 'Nexus Target Group - ${AWS::StackName}'
+
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue:
+          !Sub '${ALBStackName}-Listener'
+      Priority: '100'
+      Conditions:
+        - Field: 'host-header'
+          Values:
+            - !Ref DNSRecord
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+      - Name: nexus
+        Image: !Ref 'NexusDockerImage'
+        Hostname: nexus
+        Cpu: !Ref 'Cpu'
+        MemoryReservation: !Ref 'Memory'
+        Ulimits:
+          - Name: nofile # see https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_Ulimit.html
+            SoftLimit: 4096 # see https://help.sonatype.com/repomanager3/system-requirements#SystemRequirements-AdequateFileHandleLimits
+            HardLimit: 65536
+        Environment:
+        # We will run as this user (docker-user)
+        - Name: LOCAL_USER_ID
+          Value: 5001
+        # EFS group
+        - Name: LOCAL_USER_GID
+          Value: 555
+        - Name: INSTALL4J_ADD_VM_PARAMS # see https://hub.docker.com/r/sonatype/nexus3/
+          Value: "-Xms1g -Xmx6g -XX:MaxDirectMemorySize=3g" # see https://help.sonatype.com/repomanager3/system-requirements#SystemRequirements-Memory
+        Essential: true
+        MountPoints:
+        - ContainerPath: /nexus-data
+          SourceVolume: efs-nexus
+          ReadOnly: false
+        PortMappings:
+        - HostPort: 55000
+          ContainerPort: 8081
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'NexusLogGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: ecs
+      Volumes:
+      - Name: efs-nexus
+        Host:
+          SourcePath: !Sub
+            - ${MountPath}/docker-user/nexus
+            - MountPath:
+                Fn::ImportValue:
+                  !Sub '${ClusterStackName}-MountPath'
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - NexusLogGroup
+      - ListenerRule # the target group needs to be associated with an ALB before an ECS service can use it
+    Properties:
+      ServiceName: nexus
+      Role: !ImportValue
+        Fn::Sub: ${ClusterStackName}-EcsServiceRole
+      TaskDefinition: !Ref 'TaskDefinition'
+      DesiredCount: 1
+      LoadBalancers:
+      - ContainerName: nexus
+        ContainerPort: '8081'
+        TargetGroupArn: !Ref TargetGroup
+      Cluster: !ImportValue
+        Fn::Sub: ${ClusterStackName}-ClusterName
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+  NexusLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref 'NexusLogRetention'
+      LogGroupName: !Sub '${AWS::StackName}'
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        HostedZoneId:
+          Fn::ImportValue:
+            !Sub '${ALBStackName}-LoadBalancerCanonicalHostedZoneID'
+        DNSName:
+          Fn::ImportValue:
+            !Sub '${ALBStackName}-LoadBalancerDNSName'
+      HostedZoneName: !Ref 'HostedZoneName'
+      Name: !Sub 'nexus.${HostedZoneName}'
+      Type: A
+Outputs:
+  Service:
+    Description: The name of the ECS service created
+    Value: !GetAtt Service.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceName'
+  ServiceURL:
+    Description: Nexus Repository Manager OSS is accessible using the following URL (from inside the VPC)
+    Value: !Sub 'https://${DNSRecord}'
+  TaskArn:
+    Description: The ARN of the task created for the service
+    Value: !Ref 'TaskDefinition'
+  LogGroup:
+    Description: The name of the log group created/used for Nexus
+    Value: !Ref 'NexusLogGroup'
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupName'

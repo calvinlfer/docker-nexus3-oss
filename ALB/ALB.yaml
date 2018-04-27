@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: AWS CloudFormation template to create an Application Load Balancer (that can be used for an ECS cluster)
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC in which to create stack
+  LoadBalancerSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet in which to create load balancer instances
+  CertificateArn:
+    Type: String
+    Description: SSL certificate's ARN to assign to ALB (See Certificate Mangager/IAM certificate for the ARN)
+  LoadBalancerType:
+    Type: String
+    Description: ECS ALB type
+    Default: internal
+    AllowedValues: [internet-facing, internal]
+
+Resources:
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      # Allows traffic from anywhere to port 80 (HTTP) and port 443 (HTTPS)
+      GroupDescription: 'Security Group for load balancers which need to route traffic to container instances'
+      VpcId: !Ref 'VpcId'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+      - Key: Name
+        Value: !Sub 'ALB SG - ${AWS::StackName}'
+  DefaultTargetGroup:
+    # Must have a Target group under our listener's DefaultAction
+    # Note: This target group is not used, each ECS service should create its own target group
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-default'
+      VpcId: !Ref 'VpcId'
+      Port: 80
+      Protocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 4
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: !Ref LoadBalancerType
+      Subnets: !Ref LoadBalancerSubnetIds
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref 'CertificateArn'
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref 'DefaultTargetGroup'
+      LoadBalancerArn: !Ref 'LoadBalancer'
+      Port: '443'
+      Protocol: HTTPS
+
+Outputs:
+  VpcId:
+    # The VpcId is required by various AWS Resources, so let the dependent stack refer to the VpcId
+    Description: VPC ID
+    Value: !Ref 'VpcId'
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+  Listener:
+    # An ECS Service stack can attach Listener Rules to this Listener to get load balancing
+    Description: The ARN of the load balancer's listener
+    Value: !Ref 'Listener'
+    Export:
+      Name: !Sub '${AWS::StackName}-Listener'
+  LoadBalancerDNS:
+    Description: The DNS name of the app load balancer for the service
+    Value: !GetAtt [LoadBalancer, DNSName]
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerDNSName'
+  LoadBalancerCanonicalHostedZoneID:
+    Description: The hosted zone ID of the Application Load Balancer
+    Value: !GetAtt [LoadBalancer, CanonicalHostedZoneID]
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerCanonicalHostedZoneID'
+  LoadBalancerFullName:
+    Description: The full name of the Application Load Balancer
+    Value: !GetAtt [LoadBalancer, LoadBalancerFullName]
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerFullName'

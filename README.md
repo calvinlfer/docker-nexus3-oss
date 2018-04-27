@@ -13,7 +13,20 @@ The base [Nexus](https://hub.docker.com/r/sonatype/nexus3) image used is 3.10.0.
 
 
 ## AWS ECS ##
-The [CloudFormation template](ECSNexus.yml) deploys Nexus in an existing ECS cluster where EFS is mounted. This is 
+The [CloudFormation template](Classic/ECSNexus.yml) deploys Nexus in an existing ECS cluster where EFS is mounted. This is 
 designed to work with [ecs-cluster](https://github.com/FreckleIOT/ecs-cluster) which has CloudFormation templates to
-deploy EFS and an ECS cluster that mounts EFS. This deploys Nexus in a private subnet. You can expose this publically
+deploy EFS and an ECS cluster that mounts EFS. This deploys Nexus in a private subnet. You can expose this publicly
 using Kong API Gateway.
+
+There are two templates:
+* __ALB__: Makes use of the Application Load Balancer (recommended) 
+* __Classic__: makes use of the classic Elastic Load Balancer
+
+### ALB template ###
+The [ALB CloudFormation template](ALB/ALB.yaml) creates an Application Load Balancer with a default target group and
+the [Nexus CloudFormation template](ALB/ECSNexus.yml) creates an ECS Service which uses the Application Load Balancer
+along with an [ECS cluster that has EFS mounts](https://github.com/FreckleIOT/ecs-cluster)
+
+### Classic template ###
+An [all-in-one CloudFormation template](Classic/ECSNexus.yml) which creates an ECS Service along with a Classic Load
+Balancer.
